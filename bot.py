@@ -69,7 +69,7 @@ async def notify_transaction(tx, name):
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    await message.answer("🚀 Selamat datang di Soneium Tracker!\nGunakan /add <address> <nama> untuk mulai melacak transaksi.")
+    await message.answer("🚀 Selamat datang di Soneium Tracker!\nGunakan /add <wallet_address> <nama> untuk mulai melacak transaksi.")
 
 @dp.message(Command("add"))
 async def add_address(message: Message):
