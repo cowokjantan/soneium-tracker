@@ -9,26 +9,20 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.client.default import DefaultBotProperties
 
-# Gunakan environment variable untuk token
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Inisialisasi bot dengan default parse_mode
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# File penyimpanan data
 WATCHED_ADDRESSES_FILE = "watched_addresses.json"
-TX_CACHE_FILE = "tx_cache.json"
+LAST_BLOCK_FILE = "last_block.json"
 
-# Data address yang dipantau & transaksi yang sudah dikirim
-WATCHED_ADDRESSES = {}  # { "0x123...": {"name": "Nama Address", "chat_id": 12345678} }
-TX_CACHE = set()  # Set untuk menyimpan hash transaksi
+WATCHED_ADDRESSES = {}
+LAST_BLOCK = {}  # Menyimpan block terakhir untuk setiap address
 
-# API Blockscout Soneium
 BLOCKSCOUT_API = "https://soneium.blockscout.com/api"
 
 def load_watched_addresses():
-    """Memuat daftar address dari file saat bot dimulai."""
     global WATCHED_ADDRESSES
     try:
         with open(WATCHED_ADDRESSES_FILE, "r") as f:
@@ -37,26 +31,22 @@ def load_watched_addresses():
         WATCHED_ADDRESSES = {}
 
 def save_watched_addresses():
-    """Menyimpan daftar address ke file."""
     with open(WATCHED_ADDRESSES_FILE, "w") as f:
         json.dump(WATCHED_ADDRESSES, f)
 
-def load_tx_cache():
-    """Memuat cache transaksi dari file saat bot dimulai."""
-    global TX_CACHE
+def load_last_block():
+    global LAST_BLOCK
     try:
-        with open(TX_CACHE_FILE, "r") as f:
-            TX_CACHE = set(json.load(f))
+        with open(LAST_BLOCK_FILE, "r") as f:
+            LAST_BLOCK = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        TX_CACHE = set()
+        LAST_BLOCK = {}
 
-def save_tx_cache():
-    """Menyimpan cache transaksi ke file."""
-    with open(TX_CACHE_FILE, "w") as f:
-        json.dump(list(TX_CACHE), f)
+def save_last_block():
+    with open(LAST_BLOCK_FILE, "w") as f:
+        json.dump(LAST_BLOCK, f)
 
 async def fetch_transactions(address):
-    """Mengambil daftar transaksi terbaru untuk address tertentu."""
     url = f"{BLOCKSCOUT_API}?module=account&action=tokentx&address={address}"
     try:
         async with aiohttp.ClientSession() as session:
@@ -71,52 +61,51 @@ async def fetch_transactions(address):
         return {"result": []}
 
 async def track_transactions():
-    """Memeriksa transaksi baru setiap 30 detik."""
     while True:
         new_tx_detected = False
         for address, data in WATCHED_ADDRESSES.items():
             transactions = await fetch_transactions(address)
             if "result" in transactions:
+                last_block = int(LAST_BLOCK.get(address, "0"))  # Ambil block terakhir yang tersimpan
+                new_last_block = last_block  # Variabel untuk update block terakhir
+                
                 for tx in transactions["result"]:
-                    tx_hash = tx.get("hash")
-                    if tx_hash and tx_hash not in TX_CACHE:
-                        TX_CACHE.add(tx_hash)
+                    tx_block = int(tx.get("blockNumber", "0"))
+                    if tx_block > last_block:
                         await notify_transaction(tx, address, data["name"], data["chat_id"])
+                        new_last_block = max(new_last_block, tx_block)  # Update block tertinggi yang diproses
                         new_tx_detected = True
-        if new_tx_detected:
-            save_tx_cache()  # Simpan cache jika ada transaksi baru
+
+                if new_tx_detected:
+                    LAST_BLOCK[address] = str(new_last_block)  # Simpan last block terbaru
+                    save_last_block()
+
         await asyncio.sleep(30)
 
 async def detect_transaction_type(tx, address):
-    """Mendeteksi jenis transaksi dengan lebih akurat."""
     sender = tx.get("from", "").lower()
     receiver = tx.get("to", "").lower()
     contract = tx.get("contractAddress", "").lower()
-    value = int(tx.get("value", "0"))  # Menghindari error jika value tidak ada
+    value = int(tx.get("value", "0"))
 
-    # Jika transaksi adalah NFT
     if "tokenSymbol" in tx and "NFT" in tx["tokenSymbol"]:
         if sender == address.lower():
-            return "🎨 NFT Sale"  # Address yang dipantau menjual NFT
+            return "🎨 NFT Sale"
         elif receiver == address.lower():
-            return "🛒 NFT Purchase"  # Address yang dipantau membeli NFT
+            return "🛒 NFT Purchase"
 
-    # Jika transaksi adalah token biasa (bukan NFT)
     if "tokenSymbol" in tx:
         return "🔁 Token Transfer"
 
-    # Jika transaksi memiliki input data (interaksi dengan smart contract) dan bukan NFT
     if tx.get("input", "0x") != "0x":
         return "🔄 Swap"
 
-    # Jika transaksi memiliki nilai ETH/tokens yang dikirim langsung
     if value > 0:
         return "🔁 ETH Transfer"
 
     return "🔍 Unknown"
 
 async def notify_transaction(tx, address, name, chat_id):
-    """Mengirim notifikasi transaksi baru ke pemilik address"""
     try:
         tx_type = await detect_transaction_type(tx, address)
         msg = (f"🔔 <b>Transaksi Baru</b> 🔔\n"
@@ -141,7 +130,9 @@ async def add_address(message: Message):
     address, name = parts[1], parts[2]
     
     WATCHED_ADDRESSES[address] = {"name": name, "chat_id": message.chat.id}
-    save_watched_addresses()  # Simpan daftar address ke file
+    LAST_BLOCK[address] = "0"  # Setel block terakhir ke nol saat pertama kali menambahkan address
+    save_watched_addresses()
+    save_last_block()
     
     await message.answer(f"✅ Alamat {address} dengan nama {name} berhasil ditambahkan!")
 
@@ -165,7 +156,9 @@ async def remove_address(message: Message):
 
     if address in WATCHED_ADDRESSES:
         del WATCHED_ADDRESSES[address]
-        save_watched_addresses()  # Simpan perubahan
+        del LAST_BLOCK[address]
+        save_watched_addresses()
+        save_last_block()
         await message.answer(f"✅ Alamat {address} telah dihapus dari daftar.")
     else:
         await message.answer("⚠ Alamat tidak ditemukan dalam daftar.")
@@ -173,7 +166,7 @@ async def remove_address(message: Message):
 async def main():
     logging.info("🚀 Bot mulai berjalan...")
     load_watched_addresses()
-    load_tx_cache()
+    load_last_block()
     loop = asyncio.get_event_loop()
     loop.create_task(track_transactions())
     await dp.start_polling(bot)
