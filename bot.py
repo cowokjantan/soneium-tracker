@@ -7,26 +7,35 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import Message
+from aiogram.client.default import DefaultBotProperties
 
+# Gunakan environment variable untuk token dan chat ID
 TOKEN = os.getenv("BOT_TOKEN")
-from aiogram.enums import ParseMode
+CHAT_ID = int(os.getenv("CHAT_ID", "0"))  # Pastikan nilai default 0 agar tidak error
 
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
-
+# Inisialisasi bot dengan default parse_mode
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-WATCHED_ADDRESSES = {}
+# Data penyimpanan address yang dipantau
+WATCHED_ADDRESSES = {}  # { "0x123...": "Nama Address" }
 TX_CACHE = set()
 
+# API Blockscout Soneium
 BLOCKSCOUT_API = "https://soneium.blockscout.com/api"
 
 async def fetch_transactions(address):
+    """Mengambil daftar transaksi untuk address tertentu."""
     url = f"{BLOCKSCOUT_API}?module=account&action=txlist&address={address}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
-            return await response.json()
+            try:
+                return await response.json()
+            except json.JSONDecodeError:
+                return {"result": []}
 
 async def track_transactions():
+    """Memeriksa transaksi baru setiap 30 detik."""
     while True:
         for address, name in WATCHED_ADDRESSES.items():
             data = await fetch_transactions(address)
@@ -38,15 +47,25 @@ async def track_transactions():
                         await notify_transaction(tx, name)
         await asyncio.sleep(30)
 
+async def detect_transaction_type(tx):
+    """Mendeteksi jenis transaksi."""
+    if tx["input"] != "0x":
+        return "🔄 Swap"
+    elif tx["value"] != "0":
+        return "🔁 Transfer"
+    elif "NFT" in tx.get("tokenSymbol", ""):  # Cek NFT berdasarkan tokenSymbol
+        return "🎨 NFT Sale" if tx["value"] != "0" else "🛒 NFT Purchase"
+    return "🔍 Unknown"
+
 async def notify_transaction(tx, name):
-    tx_type = "🔄 Swap" if tx["input"] != "0x" else "🔁 Transfer"
-    if "NFT" in tx_type:
-        tx_type = "🎨 NFT Sale" if tx["value"] != "0" else "🛒 NFT Purchase"
+    """Mengirim notifikasi transaksi baru ke Telegram."""
+    tx_type = await detect_transaction_type(tx)
     msg = (f"🔔 <b>Transaksi Baru</b> 🔔\n"
            f"👤 <b>{name}</b>\n"
            f"🔹 Type: {tx_type}\n"
            f"🔗 <a href='https://soneium.blockscout.com/tx/{tx['hash']}'>Lihat di Block Explorer</a>")
-    await bot.send_message(os.getenv("CHAT_ID"), msg, parse_mode="HTML")
+
+    await bot.send_message(CHAT_ID, msg)
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
