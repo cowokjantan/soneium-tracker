@@ -1,140 +1,141 @@
-import asyncio
 import os
-import json
-import aiohttp
+import asyncio
+import logging
+import requests
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import Message
 from aiogram.filters import Command
+from dotenv import load_dotenv
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Token bot dari Telegram
-API_URL = "https://soneium.blockscout.com/api"  # API Blockscout Soneium
+# Load .env file
+load_dotenv()
 
-bot = Bot(token=TOKEN)
+# Ambil token dari environment variable
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN or not TOKEN.strip():
+    raise ValueError("❌ BOT_TOKEN tidak ditemukan! Pastikan sudah diatur di Railway Variables atau .env.")
+
+# Inisialisasi bot dan dispatcher
+bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 
-# Data penyimpanan alamat & transaksi yang sudah dikirim notifikasi
-tracked_addresses = {}  # Format: {chat_id: {address: "name"}}
-sent_transactions = set()  # Set untuk menyimpan hash transaksi yang sudah dikirim
+# API Blockscout Soneium
+BLOCKSCOUT_API = "https://soneium.blockscout.com/api"
 
-# -------------------- COMMAND HANDLERS --------------------
+# Data tracking (format: {chat_id: {alamat: nama}})
+tracked_addresses = {}
+last_seen_tx = {}
 
-# Start bot
+# Perintah /start
+@dp.message(Command("start"))
 async def start_handler(message: Message):
-    await message.answer("🚀 Selamat datang! Kirimkan alamat yang ingin dilacak dengan format:\n\n`/track 0xAlamat NamaAnda`")
+    await message.answer("✅ Bot berjalan!\nGunakan /track <alamat> <nama> untuk mulai tracking.")
 
-# Tambah alamat yang ingin dilacak
-async def track_handler(message: Message):
-    parts = message.text.split()
-    if len(parts) < 3:
-        await message.answer("❌ Format salah! Gunakan: `/track 0xAlamat NamaAnda`")
+# Perintah untuk menambahkan alamat dengan nama
+@dp.message(Command("track"))
+async def track_address(message: Message):
+    args = message.text.split(" ")
+    if len(args) < 2:
+        await message.answer("❌ Harap masukkan alamat dan (opsional) nama setelah perintah /track.\n\n📌 Contoh: <code>/track 0x1234567890abcdef WalletKu</code>")
         return
 
-    chat_id = message.chat.id
-    address = parts[1]
-    name = " ".join(parts[2:])  # Menggabungkan nama jika lebih dari satu kata
+    address = args[1]
+    name = " ".join(args[2:]) if len(args) > 2 else address  # Jika tidak ada nama, gunakan alamat
 
+    chat_id = message.chat.id
     if chat_id not in tracked_addresses:
         tracked_addresses[chat_id] = {}
 
     tracked_addresses[chat_id][address] = name
-    await message.answer(f"✅ Alamat `{address}` ({name}) berhasil ditambahkan!")
+    await message.answer(f"✅ Alamat <code>{address}</code> ({name}) ditambahkan ke tracking!")
 
-# Lihat alamat yang sudah tersimpan
-async def list_handler(message: Message):
+# Perintah untuk melihat daftar alamat yang sedang dilacak
+@dp.message(Command("list"))
+async def list_addresses(message: Message):
     chat_id = message.chat.id
     if chat_id not in tracked_addresses or not tracked_addresses[chat_id]:
-        await message.answer("ℹ Tidak ada alamat yang dilacak.")
+        await message.answer("📭 Anda belum melacak alamat apa pun.")
         return
 
-    text = "📋 **Alamat yang sedang dilacak:**\n\n"
+    response = "📋 <b>Daftar Alamat yang Dilacak:</b>\n"
     for address, name in tracked_addresses[chat_id].items():
-        text += f"🔹 `{address}` - {name}\n"
+        response += f"🔹 <b>{name}</b>: <code>{address}</code>\n"
 
-    await message.answer(text)
+    await message.answer(response)
 
-# Hapus alamat dari daftar
-async def untrack_handler(message: Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("❌ Format salah! Gunakan: `/untrack 0xAlamat`")
-        return
-
-    chat_id = message.chat.id
-    address = parts[1]
-
-    if chat_id in tracked_addresses and address in tracked_addresses[chat_id]:
-        del tracked_addresses[chat_id][address]
-        await message.answer(f"✅ Alamat `{address}` berhasil dihapus!")
-    else:
-        await message.answer(f"❌ Alamat `{address}` tidak ditemukan dalam daftar.")
-
-# -------------------- TRANSACTION CHECKING --------------------
-
-# Fungsi untuk mendapatkan transaksi dari API Blockscout
+# Fungsi untuk mengambil transaksi dari Blockscout
 async def fetch_transactions(address):
-    url = f"{API_URL}?module=account&action=txlist&address={address}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data.get("result", [])
-            return []
+    try:
+        url = f"{BLOCKSCOUT_API}?module=account&action=txlist&address={address}"
+        response = requests.get(url)
+        data = response.json()
+        
+        if data.get("status") == "1" and "result" in data:
+            return data["result"]
+        return []
+    except Exception as e:
+        logging.error(f"Error fetching transactions: {e}")
+        return []
 
-# Fungsi untuk memeriksa transaksi baru
+# Fungsi untuk menentukan jenis transaksi
+def get_transaction_type(tx, address):
+    from_addr = tx["from"].lower()
+    to_addr = tx["to"].lower() if tx["to"] else None
+
+    if to_addr is None:
+        return "UNKNOWN"
+
+    address = address.lower()
+
+    if from_addr == address:
+        return "SEND" if "input" not in tx or tx["input"] == "0x" else "SELL"
+    if to_addr == address:
+        return "RECEIVED" if "input" not in tx or tx["input"] == "0x" else "BUY"
+
+    return "UNKNOWN"
+
+# Fungsi untuk memantau transaksi
 async def check_transactions():
     while True:
-        try:
-            for chat_id, addresses in tracked_addresses.items():
-                for address, name in addresses.items():
-                    transactions = await fetch_transactions(address)
-                    for tx in transactions:
-                        tx_hash = tx["hash"]
-                        from_address = tx["from"]
-                        to_address = tx["to"]
-                        value = int(tx["value"]) / 10**18  # Ubah ke ETH
-                        token_symbol = "SONE"  # Ubah jika ada token lain
+        for chat_id, addresses in tracked_addresses.items():
+            for address, name in addresses.items():
+                transactions = await fetch_transactions(address)
 
-                        # Cek apakah transaksi ini sudah dikirim
-                        if tx_hash in sent_transactions:
-                            continue
+                if not transactions:
+                    continue
+                
+                for tx in transactions:
+                    tx_hash = tx["hash"]
+                    if address not in last_seen_tx:
+                        last_seen_tx[address] = set()
+                    
+                    if tx_hash in last_seen_tx[address]:
+                        continue  # Lewati jika sudah dikirim sebelumnya
 
-                        # Tentukan jenis transaksi
-                        if to_address.lower() == address.lower():
-                            tx_type = "RECEIVE"
-                        elif from_address.lower() == address.lower():
-                            tx_type = "SEND"
-                        else:
-                            tx_type = "UNKNOWN"
+                    last_seen_tx[address].add(tx_hash)
+                    tx_link = f"<a href='https://soneium.blockscout.com/tx/{tx_hash}'>🔗 Lihat TX</a>"
 
-                        message = (
-                            f"🔔 **Transaksi Baru**\n"
-                            f"🆔 TxHash: `{tx_hash}`\n"
-                            f"👤 Dari: `{from_address}`\n"
-                            f"📩 Ke: `{to_address}`\n"
-                            f"💰 Jumlah: `{value} {token_symbol}`\n"
-                            f"📌 Jenis: `{tx_type}`\n"
-                        )
+                    # Tentukan jenis transaksi
+                    tx_type = get_transaction_type(tx, address)
+                    if tx_type == "SEND":
+                        message = f"📤 <b>{name} Mengirim:</b> {tx_link}"
+                    elif tx_type == "RECEIVED":
+                        message = f"📥 <b>{name} Menerima:</b> {tx_link}"
+                    elif tx_type == "BUY":
+                        message = f"🛒 <b>{name} Membeli NFT:</b> {tx_link}"
+                    elif tx_type == "SELL":
+                        message = f"💰 <b>{name} Menjual NFT:</b> {tx_link}"
+                    else:
+                        continue  # Jika tidak diketahui, skip
 
-                        # Kirim notifikasi ke bot
-                        await bot.send_message(chat_id, message)
+                    await bot.send_message(chat_id, message)
 
-                        # Simpan hash transaksi agar tidak dikirim ulang
-                        sent_transactions.add(tx_hash)
+        await asyncio.sleep(30)  # Cek transaksi setiap 30 detik
 
-        except Exception as e:
-            print(f"Error checking transactions: {e}")
-
-        await asyncio.sleep(10)  # Periksa setiap 10 detik
-
-# -------------------- REGISTER HANDLERS & MAIN --------------------
-
-dp.message.register(start_handler, Command("start"))
-dp.message.register(track_handler, Command("track"))
-dp.message.register(list_handler, Command("list"))
-dp.message.register(untrack_handler, Command("untrack"))
-
+# Fungsi utama untuk menjalankan bot
 async def main():
-    asyncio.create_task(check_transactions())  # Jalankan pemantauan transaksi
+    logging.basicConfig(level=logging.INFO)
+    asyncio.create_task(check_transactions())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
