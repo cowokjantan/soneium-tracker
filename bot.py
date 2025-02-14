@@ -9,7 +9,10 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 TOKEN = os.getenv("BOT_TOKEN")
-bot = Bot(token=TOKEN, default=types.DefaultBotProperties(parse_mode=ParseMode.HTML))
+from aiogram.enums import ParseMode
+
+bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+
 dp = Dispatcher()
 
 WATCHED_ADDRESSES = {}
