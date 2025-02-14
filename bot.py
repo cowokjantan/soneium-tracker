@@ -16,12 +16,44 @@ TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Data penyimpanan address yang dipantau
+# File penyimpanan data
+WATCHED_ADDRESSES_FILE = "watched_addresses.json"
+TX_CACHE_FILE = "tx_cache.json"
+
+# Data address yang dipantau & transaksi yang sudah dikirim
 WATCHED_ADDRESSES = {}  # { "0x123...": {"name": "Nama Address", "chat_id": 12345678} }
-TX_CACHE = set()
+TX_CACHE = set()  # Set untuk menyimpan hash transaksi
 
 # API Blockscout Soneium
 BLOCKSCOUT_API = "https://soneium.blockscout.com/api"
+
+def load_watched_addresses():
+    """Memuat daftar address dari file saat bot dimulai."""
+    global WATCHED_ADDRESSES
+    try:
+        with open(WATCHED_ADDRESSES_FILE, "r") as f:
+            WATCHED_ADDRESSES = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        WATCHED_ADDRESSES = {}
+
+def save_watched_addresses():
+    """Menyimpan daftar address ke file."""
+    with open(WATCHED_ADDRESSES_FILE, "w") as f:
+        json.dump(WATCHED_ADDRESSES, f)
+
+def load_tx_cache():
+    """Memuat cache transaksi dari file saat bot dimulai."""
+    global TX_CACHE
+    try:
+        with open(TX_CACHE_FILE, "r") as f:
+            TX_CACHE = set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        TX_CACHE = set()
+
+def save_tx_cache():
+    """Menyimpan cache transaksi ke file."""
+    with open(TX_CACHE_FILE, "w") as f:
+        json.dump(list(TX_CACHE), f)
 
 async def fetch_transactions(address):
     """Mengambil daftar transaksi untuk address tertentu."""
@@ -36,6 +68,7 @@ async def fetch_transactions(address):
 async def track_transactions():
     """Memeriksa transaksi baru setiap 30 detik."""
     while True:
+        new_tx_detected = False
         for address, data in WATCHED_ADDRESSES.items():
             transactions = await fetch_transactions(address)
             if "result" in transactions:
@@ -44,6 +77,9 @@ async def track_transactions():
                     if tx_hash not in TX_CACHE:
                         TX_CACHE.add(tx_hash)
                         await notify_transaction(tx, data["name"], data["chat_id"])
+                        new_tx_detected = True
+        if new_tx_detected:
+            save_tx_cache()  # Simpan cache jika ada transaksi baru
         await asyncio.sleep(30)
 
 async def detect_transaction_type(tx):
@@ -80,7 +116,10 @@ async def add_address(message: Message):
         await message.answer("⚠ Gunakan format: /add <address> <nama>")
         return
     address, name = parts[1], parts[2]
+    
     WATCHED_ADDRESSES[address] = {"name": name, "chat_id": message.chat.id}
+    save_watched_addresses()  # Simpan daftar address ke file
+    
     await message.answer(f"✅ Alamat {address} dengan nama {name} berhasil ditambahkan!")
 
 @dp.message(Command("list"))
@@ -93,8 +132,25 @@ async def list_addresses(message: Message):
             msg += f"- {data['name']}: <code>{addr}</code>\n"
         await message.answer(msg, parse_mode="HTML")
 
+@dp.message(Command("remove"))
+async def remove_address(message: Message):
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("⚠ Gunakan format: /remove <address>")
+        return
+    address = parts[1]
+
+    if address in WATCHED_ADDRESSES:
+        del WATCHED_ADDRESSES[address]
+        save_watched_addresses()  # Simpan perubahan
+        await message.answer(f"✅ Alamat {address} telah dihapus dari daftar.")
+    else:
+        await message.answer("⚠ Alamat tidak ditemukan dalam daftar.")
+
 async def main():
     logging.info("🚀 Bot mulai berjalan...")
+    load_watched_addresses()  # Muat daftar address sebelum mulai
+    load_tx_cache()  # Muat cache transaksi sebelum mulai
     loop = asyncio.get_event_loop()
     loop.create_task(track_transactions())
     await dp.start_polling(bot)
