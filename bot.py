@@ -1,125 +1,105 @@
-import os
 import asyncio
 import logging
-import aiohttp
+import os
 import json
-
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
 from aiogram.types import Message
-from aiogram.enums.parse_mode import ParseMode
-from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import Command
+from aiogram.enums import ParseMode
+import aiohttp
 
-# Konfigurasi logging
+# Logging
 logging.basicConfig(level=logging.INFO)
 
-# Ambil TOKEN dari environment variables
+# Load token
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
-    raise ValueError("❌ BOT_TOKEN tidak ditemukan! Pastikan sudah diatur di Railway Variables atau .env.")
+    raise ValueError("❌ BOT_TOKEN tidak ditemukan! Pastikan sudah diatur di Railway Variables.")
 
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(token=TOKEN, default=types.DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# URL API Blockscout
-BLOCKSCOUT_API = "https://soneium.blockscout.com/api"
+# File untuk menyimpan data pengguna
+DATA_FILE = "users.json"
 
-# Database untuk menyimpan alamat pengguna
-USER_ADDRESSES = {}  # Format: {chat_id: {"nama1": "0x123...", "nama2": "0x456..."}}
-SENT_TX_HASHES = set()  # Menyimpan tx_hash agar tidak mengirim ulang
+def load_users():
+    """Memuat data pengguna dari file JSON."""
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as file:
+            return json.load(file)
+    return {}
 
+def save_users(users):
+    """Menyimpan data pengguna ke file JSON."""
+    with open(DATA_FILE, "w") as file:
+        json.dump(users, file, indent=4)
 
-async def fetch_transactions(address):
-    """Mengambil transaksi dari Blockscout API."""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{BLOCKSCOUT_API}?module=account&action=txlist&address={address}") as resp:
-            if resp.status == 200:
-                return await resp.json()
-            return None
-
-
-def filter_transaction(tx):
-    """Filter transaksi berdasarkan kategori Send, Received, Buy NFT, Sell NFT."""
-    if tx.get("input") == "0x":  # Contoh sederhana (perlu dicek lebih lanjut)
-        if tx["from"] == tx["to"]:
-            return "Buy NFT"
-        return "Send"
-    elif tx["to"] == "0x":  # Contoh sederhana (perlu dicek lebih lanjut)
-        return "Sell NFT"
-    else:
-        return "Received"
-
-
-async def check_transactions():
-    """Memeriksa transaksi dan mengirim notifikasi jika ada transaksi baru."""
-    while True:
-        for chat_id, addresses in USER_ADDRESSES.items():
-            for name, address in addresses.items():
-                data = await fetch_transactions(address)
-                if data and "result" in data:
-                    for tx in data["result"]:
-                        tx_hash = tx["hash"]
-                        if tx_hash not in SENT_TX_HASHES:
-                            tx_type = filter_transaction(tx)
-                            tx_link = f"https://soneium.blockscout.com/tx/{tx_hash}"
-                            message = (
-                                f"🔔 <b>Transaksi Baru</b>\n"
-                                f"🏷️ <b>Nama:</b> {name}\n"
-                                f"🔹 <b>Type:</b> {tx_type}\n"
-                                f"💰 <b>Value:</b> {tx['value']} SONE\n"
-                                f"🔗 <a href='{tx_link}'>Lihat di Blockscout</a>"
-                            )
-                            await bot.send_message(chat_id, message)
-                            SENT_TX_HASHES.add(tx_hash)
-        await asyncio.sleep(30)  # Cek transaksi setiap 30 detik
-
+users = load_users()
 
 @dp.message(Command("start"))
 async def start(message: Message):
-    """Perintah /start untuk menampilkan pesan selamat datang."""
-    await message.answer("👋 Selamat datang! Gunakan /add untuk menambahkan alamat yang ingin dipantau.")
-
+    await message.answer("👋 Selamat datang di Soneium Tracker!\nGunakan /add <nama> <alamat> untuk mulai melacak.")
 
 @dp.message(Command("add"))
 async def add_address(message: Message):
-    """Menambahkan alamat ke daftar pemantauan."""
-    args = message.text.split(" ")
+    args = message.text.split()
     if len(args) < 3:
-        await message.answer("❌ Format salah! Gunakan: /add nama_address 0xYourWallet")
+        await message.answer("❌ Format salah! Gunakan: /add <nama> <alamat>")
         return
     
-    name = args[1]
-    address = args[2]
+    name, address = args[1], args[2]
+    user_id = str(message.chat.id)
     
-    if message.chat.id not in USER_ADDRESSES:
-        USER_ADDRESSES[message.chat.id] = {}
+    if user_id not in users:
+        users[user_id] = {}
+    users[user_id][name] = address
+    save_users(users)
     
-    USER_ADDRESSES[message.chat.id][name] = address
-    await message.answer(f"✅ Alamat {name} ({address}) berhasil ditambahkan!")
-
+    await message.answer(f"✅ Alamat <b>{name}</b> ({address}) ditambahkan!")
 
 @dp.message(Command("remove"))
 async def remove_address(message: Message):
-    """Menghapus alamat dari daftar pemantauan."""
-    args = message.text.split(" ")
+    args = message.text.split()
     if len(args) < 2:
-        await message.answer("❌ Format salah! Gunakan: /remove nama_address")
+        await message.answer("❌ Format salah! Gunakan: /remove <nama>")
         return
     
     name = args[1]
+    user_id = str(message.chat.id)
     
-    if message.chat.id in USER_ADDRESSES and name in USER_ADDRESSES[message.chat.id]:
-        del USER_ADDRESSES[message.chat.id][name]
-        await message.answer(f"✅ Alamat {name} berhasil dihapus dari pemantauan!")
+    if user_id in users and name in users[user_id]:
+        del users[user_id][name]
+        save_users(users)
+        await message.answer(f"✅ Alamat <b>{name}</b> telah dihapus!")
     else:
-        await message.answer(f"⚠️ Alamat {name} tidak ditemukan dalam daftar pemantauan.")
+        await message.answer("⚠️ Nama tidak ditemukan.")
 
+async def fetch_transactions():
+    """Mengambil transaksi terbaru untuk semua pengguna."""
+    url = "https://soneium.blockscout.com/api/v2/transactions"  # Gantilah dengan endpoint yang benar
+    seen_txs = set()
+    
+    while True:
+        async with aiohttp.ClientSession() as session:
+            for user_id, addresses in users.items():
+                for name, address in addresses.items():
+                    params = {"address": address, "limit": 5}  # Ambil 5 transaksi terbaru
+                    async with session.get(url, params=params) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            for tx in data.get("items", []):
+                                tx_hash = tx["hash"]
+                                if tx_hash not in seen_txs:
+                                    seen_txs.add(tx_hash)
+                                    tx_link = f"<a href='https://soneium.blockscout.com/tx/{tx_hash}'>Lihat Tx</a>"
+                                    await bot.send_message(user_id, f"🔄 Transaksi baru untuk <b>{name}</b>: {tx_link}")
+        
+        await asyncio.sleep(30)  # Cek setiap 30 detik
 
 async def main():
-    """Menjalankan bot dan task monitoring."""
-    asyncio.create_task(check_transactions())
+    """Menjalankan bot dan proses tracking."""
+    asyncio.create_task(fetch_transactions())
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
