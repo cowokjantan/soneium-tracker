@@ -15,10 +15,10 @@ bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 WATCHED_ADDRESSES_FILE = "watched_addresses.json"
-LAST_BLOCK_FILE = "last_block.json"
+TX_CACHE_FILE = "tx_cache.json"
 
 WATCHED_ADDRESSES = {}
-LAST_BLOCK = {}  # Menyimpan block terakhir untuk setiap address
+TX_CACHE = set()  # Menyimpan hash transaksi yang sudah diproses
 
 BLOCKSCOUT_API = "https://soneium.blockscout.com/api"
 
@@ -34,70 +34,68 @@ def save_watched_addresses():
     with open(WATCHED_ADDRESSES_FILE, "w") as f:
         json.dump(WATCHED_ADDRESSES, f)
 
-def load_last_block():
-    global LAST_BLOCK
+def load_tx_cache():
+    global TX_CACHE
     try:
-        with open(LAST_BLOCK_FILE, "r") as f:
-            LAST_BLOCK = json.load(f)
+        with open(TX_CACHE_FILE, "r") as f:
+            TX_CACHE = set(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
-        LAST_BLOCK = {}
+        TX_CACHE = set()
 
-def save_last_block():
-    with open(LAST_BLOCK_FILE, "w") as f:
-        json.dump(LAST_BLOCK, f)
+def save_tx_cache():
+    with open(TX_CACHE_FILE, "w") as f:
+        json.dump(list(TX_CACHE), f)
 
 async def fetch_transactions(address):
     url = f"{BLOCKSCOUT_API}?module=account&action=tokentx&address={address}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    logging.error(f"❌ Gagal mengambil data transaksi: {response.status}")
-                    return {"result": []}
-    except Exception as e:
-        logging.error(f"❌ Error saat mengambil transaksi: {e}")
-        return {"result": []}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            try:
+                return await response.json()
+            except json.JSONDecodeError:
+                return {"result": []}
 
 async def track_transactions():
+    """Cek transaksi baru setiap 30 detik tanpa mengulang transaksi lama."""
     while True:
         new_tx_detected = False
         for address, data in WATCHED_ADDRESSES.items():
             transactions = await fetch_transactions(address)
             if "result" in transactions:
-                last_block = int(LAST_BLOCK.get(address, "0"))  # Ambil block terakhir yang tersimpan
-                new_last_block = last_block  # Variabel untuk update block terakhir
-                
                 for tx in transactions["result"]:
-                    tx_block = int(tx.get("blockNumber", "0"))
-                    if tx_block > last_block:
+                    tx_hash = tx["hash"]
+                    if tx_hash not in TX_CACHE:  # Jika transaksi baru
+                        TX_CACHE.add(tx_hash)
                         await notify_transaction(tx, address, data["name"], data["chat_id"])
-                        new_last_block = max(new_last_block, tx_block)  # Update block tertinggi yang diproses
                         new_tx_detected = True
-
-                if new_tx_detected:
-                    LAST_BLOCK[address] = str(new_last_block)  # Simpan last block terbaru
-                    save_last_block()
-
+        
+        if new_tx_detected:
+            save_tx_cache()  # Simpan transaksi baru ke cache
         await asyncio.sleep(30)
 
+async def initialize_tx_cache():
+    """Memuat transaksi awal tanpa mengirim notifikasi."""
+    logging.info("🔄 Mengisi cache transaksi awal...")
+    for address in WATCHED_ADDRESSES.keys():
+        transactions = await fetch_transactions(address)
+        if "result" in transactions:
+            for tx in transactions["result"]:
+                TX_CACHE.add(tx["hash"])  # Tambahkan transaksi tanpa notif
+    save_tx_cache()  # Simpan cache ke file
+    logging.info("✅ Cache transaksi awal tersimpan.")
+
 async def detect_transaction_type(tx, address):
-    sender = tx.get("from", "").lower()
-    receiver = tx.get("to", "").lower()
-    contract = tx.get("contractAddress", "").lower()
-    value = int(tx.get("value", "0"))
+    sender = tx["from"].lower()
+    receiver = tx["to"].lower()
+    value = int(tx["value"])
 
     if "tokenSymbol" in tx and "NFT" in tx["tokenSymbol"]:
-        if sender == address.lower():
-            return "🎨 NFT Sale"
-        elif receiver == address.lower():
-            return "🛒 NFT Purchase"
+        return "🎨 NFT Sale" if sender == address.lower() else "🛒 NFT Purchase"
 
     if "tokenSymbol" in tx:
         return "🔁 Token Transfer"
 
-    if tx.get("input", "0x") != "0x":
+    if tx["input"] != "0x":
         return "🔄 Swap"
 
     if value > 0:
@@ -106,6 +104,7 @@ async def detect_transaction_type(tx, address):
     return "🔍 Unknown"
 
 async def notify_transaction(tx, address, name, chat_id):
+    """Mengirim notifikasi jika ada transaksi baru."""
     try:
         tx_type = await detect_transaction_type(tx, address)
         msg = (f"🔔 <b>Transaksi Baru</b> 🔔\n"
@@ -130,9 +129,7 @@ async def add_address(message: Message):
     address, name = parts[1], parts[2]
     
     WATCHED_ADDRESSES[address] = {"name": name, "chat_id": message.chat.id}
-    LAST_BLOCK[address] = "0"  # Setel block terakhir ke nol saat pertama kali menambahkan address
     save_watched_addresses()
-    save_last_block()
     
     await message.answer(f"✅ Alamat {address} dengan nama {name} berhasil ditambahkan!")
 
@@ -156,9 +153,7 @@ async def remove_address(message: Message):
 
     if address in WATCHED_ADDRESSES:
         del WATCHED_ADDRESSES[address]
-        del LAST_BLOCK[address]
         save_watched_addresses()
-        save_last_block()
         await message.answer(f"✅ Alamat {address} telah dihapus dari daftar.")
     else:
         await message.answer("⚠ Alamat tidak ditemukan dalam daftar.")
@@ -166,7 +161,8 @@ async def remove_address(message: Message):
 async def main():
     logging.info("🚀 Bot mulai berjalan...")
     load_watched_addresses()
-    load_last_block()
+    load_tx_cache()  # Load transaksi yang sudah diproses sebelumnya
+    await initialize_tx_cache()  # Isi cache tanpa notif saat pertama kali berjalan
     loop = asyncio.get_event_loop()
     loop.create_task(track_transactions())
     await dp.start_polling(bot)
