@@ -3,7 +3,7 @@ import asyncio
 import aiohttp
 import json
 import os
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -35,6 +35,7 @@ def save_watched_addresses():
         json.dump(WATCHED_ADDRESSES, f)
 
 def load_tx_cache():
+    """Memuat transaksi yang sudah diproses sebelumnya."""
     global TX_CACHE
     try:
         with open(TX_CACHE_FILE, "r") as f:
@@ -43,10 +44,12 @@ def load_tx_cache():
         TX_CACHE = set()
 
 def save_tx_cache():
+    """Menyimpan transaksi yang sudah diproses ke file."""
     with open(TX_CACHE_FILE, "w") as f:
         json.dump(list(TX_CACHE), f)
 
 async def fetch_transactions(address):
+    """Mengambil data transaksi dari Blockscout API."""
     url = f"{BLOCKSCOUT_API}?module=account&action=tokentx&address={address}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
@@ -56,14 +59,15 @@ async def fetch_transactions(address):
                 return {"result": []}
 
 async def track_transactions():
+    """Melacak transaksi baru dan mengirim notifikasi jika ditemukan."""
     while True:
         new_tx_detected = False
         for address, data in WATCHED_ADDRESSES.items():
             transactions = await fetch_transactions(address)
-            if "result" in transactions:
+            if transactions.get("result"):
                 for tx in transactions["result"]:
-                    tx_hash = tx["hash"]
-                    if tx_hash not in TX_CACHE:
+                    tx_hash = tx.get("hash")
+                    if tx_hash and tx_hash not in TX_CACHE:
                         TX_CACHE.add(tx_hash)
                         await notify_transaction(tx, address, data["name"], data["chat_id"])
                         new_tx_detected = True
@@ -72,19 +76,25 @@ async def track_transactions():
         await asyncio.sleep(30)
 
 async def initialize_tx_cache():
+    """Mengisi cache transaksi awal tanpa mengirim notifikasi."""
     logging.info("🔄 Mengisi cache transaksi awal...")
+    TX_CACHE.clear()  # Kosongkan cache saat bot dimulai untuk menghindari spam
+    open(TX_CACHE_FILE, "w").close()
     for address in WATCHED_ADDRESSES.keys():
         transactions = await fetch_transactions(address)
-        if "result" in transactions:
+        if transactions.get("result"):
             for tx in transactions["result"]:
-                TX_CACHE.add(tx["hash"])
+                tx_hash = tx.get("hash")
+                if tx_hash:
+                    TX_CACHE.add(tx_hash)
     save_tx_cache()
     logging.info("✅ Cache transaksi awal tersimpan.")
 
 async def detect_transaction_type(tx, address):
-    sender = tx["from"].lower()
-    receiver = tx["to"].lower()
-    value = int(tx.get("value", "0"))
+    """Mendeteksi jenis transaksi berdasarkan data yang tersedia."""
+    sender = tx.get("from", "").lower()
+    receiver = tx.get("to", "").lower()
+    value = int(tx.get("value", "0")) if tx.get("value") else 0
 
     if "tokenSymbol" in tx and "NFT" in tx["tokenSymbol"]:
         return "🎨 NFT Sale" if sender == address.lower() else "🛒 NFT Purchase"
@@ -92,7 +102,7 @@ async def detect_transaction_type(tx, address):
     if "tokenSymbol" in tx:
         return "🔁 Token Transfer"
 
-    if tx["input"] != "0x":
+    if tx.get("input") and tx["input"] != "0x":
         return "🔄 Swap"
 
     if value > 0:
@@ -101,12 +111,13 @@ async def detect_transaction_type(tx, address):
     return "🔍 Unknown"
 
 async def notify_transaction(tx, address, name, chat_id):
+    """Mengirim notifikasi ke Telegram saat ada transaksi baru."""
     try:
         tx_type = await detect_transaction_type(tx, address)
         msg = (f"🔔 <b>Transaksi Baru</b> 🔔\n"
                f"👤 <b>{name}</b>\n"
                f"🔹 Type: {tx_type}\n"
-               f"🔗 <a href='https://soneium.blockscout.com/tx/{tx['hash']}'>Lihat di Block Explorer</a>")
+               f"🔗 <a href='https://soneium.blockscout.com/tx/{tx.get('hash')}'>Lihat di Block Explorer</a>")
         await bot.send_message(chat_id, msg)
     except Exception as e:
         logging.error(f"❌ Gagal mengirim notifikasi: {e}")
@@ -114,7 +125,7 @@ async def notify_transaction(tx, address, name, chat_id):
 @dp.message(Command("start"))
 async def start_handler(message: Message):
     await message.answer("🚀 Selamat datang di Soneium Tracker!\n"
-                         "Gunakan /add 'wallet_address' 'nama' untuk mulai melacak transaksi.")
+                         "Gunakan /add <address> <nama> untuk mulai melacak transaksi.")
 
 @dp.message(Command("add"))
 async def add_address(message: Message):
