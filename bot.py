@@ -18,17 +18,19 @@ dp = Dispatcher()
 # Menyimpan alamat wallet yang dipantau
 tracked_addresses = set()
 
-@dp.message()
-async def handle_message(message: Message):
-    if message.text.startswith("/start"):
-        await message.answer("Halo! Kirim alamat wallet Soneium untuk dipantau.")
+
+async def start_handler(message: Message):
+    await message.answer("Halo! Kirim alamat wallet Soneium untuk dipantau.")
+
+
+async def track_wallet_handler(message: Message):
+    address = message.text.strip()
+    if address.startswith("0x") and len(address) == 42:
+        tracked_addresses.add(address)
+        await message.answer(f"✅ Alamat <code>{address}</code> ditambahkan untuk dipantau!")
     else:
-        address = message.text.strip()
-        if address.startswith("0x") and len(address) == 42:
-            tracked_addresses.add(address)
-            await message.answer(f"✅ Alamat <code>{address}</code> ditambahkan untuk dipantau!")
-        else:
-            await message.answer("❌ Alamat tidak valid. Harus berupa address Soneium yang benar.")
+        await message.answer("❌ Alamat tidak valid. Harus berupa address Soneium yang benar.")
+
 
 async def check_transactions():
     while True:
@@ -46,11 +48,15 @@ async def check_transactions():
                         await bot.send_message(chat_id=chat_id, text=msg)
         await asyncio.sleep(30)  # Cek transaksi setiap 30 detik
 
+
 async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
-    dp.include_router(dp.router)
+    dp.message.register(start_handler, commands={"start"})
+    dp.message.register(track_wallet_handler)
+
     asyncio.create_task(check_transactions())  # Jalankan tracking transaksi
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
