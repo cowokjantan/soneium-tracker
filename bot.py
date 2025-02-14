@@ -58,12 +58,17 @@ def save_tx_cache():
 async def fetch_transactions(address):
     """Mengambil daftar transaksi terbaru untuk address tertentu."""
     url = f"{BLOCKSCOUT_API}?module=account&action=tokentx&address={address}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            try:
-                return await response.json()
-            except json.JSONDecodeError:
-                return {"result": []}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    logging.error(f"❌ Gagal mengambil data transaksi: {response.status}")
+                    return {"result": []}
+    except Exception as e:
+        logging.error(f"❌ Error saat mengambil transaksi: {e}")
+        return {"result": []}
 
 async def track_transactions():
     """Memeriksa transaksi baru setiap 30 detik."""
@@ -73,8 +78,8 @@ async def track_transactions():
             transactions = await fetch_transactions(address)
             if "result" in transactions:
                 for tx in transactions["result"]:
-                    tx_hash = tx["hash"]
-                    if tx_hash not in TX_CACHE:
+                    tx_hash = tx.get("hash")
+                    if tx_hash and tx_hash not in TX_CACHE:
                         TX_CACHE.add(tx_hash)
                         await notify_transaction(tx, address, data["name"], data["chat_id"])
                         new_tx_detected = True
@@ -84,10 +89,10 @@ async def track_transactions():
 
 async def detect_transaction_type(tx, address):
     """Mendeteksi jenis transaksi dengan lebih akurat."""
-    sender = tx["from"].lower()
-    receiver = tx["to"].lower()
+    sender = tx.get("from", "").lower()
+    receiver = tx.get("to", "").lower()
     contract = tx.get("contractAddress", "").lower()
-    value = int(tx["value"])
+    value = int(tx.get("value", "0"))  # Menghindari error jika value tidak ada
 
     # Jika transaksi adalah NFT
     if "tokenSymbol" in tx and "NFT" in tx["tokenSymbol"]:
@@ -101,7 +106,7 @@ async def detect_transaction_type(tx, address):
         return "🔁 Token Transfer"
 
     # Jika transaksi memiliki input data (interaksi dengan smart contract) dan bukan NFT
-    if tx["input"] != "0x":
+    if tx.get("input", "0x") != "0x":
         return "🔄 Swap"
 
     # Jika transaksi memiliki nilai ETH/tokens yang dikirim langsung
@@ -167,8 +172,8 @@ async def remove_address(message: Message):
 
 async def main():
     logging.info("🚀 Bot mulai berjalan...")
-    load_watched_addresses()  # Muat daftar address sebelum mulai
-    load_tx_cache()  # Muat cache transaksi sebelum mulai
+    load_watched_addresses()
+    load_tx_cache()
     loop = asyncio.get_event_loop()
     loop.create_task(track_transactions())
     await dp.start_polling(bot)
