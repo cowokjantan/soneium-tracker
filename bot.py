@@ -56,8 +56,8 @@ def save_tx_cache():
         json.dump(list(TX_CACHE), f)
 
 async def fetch_transactions(address):
-    """Mengambil daftar transaksi untuk address tertentu."""
-    url = f"{BLOCKSCOUT_API}?module=account&action=txlist&address={address}"
+    """Mengambil daftar transaksi terbaru untuk address tertentu."""
+    url = f"{BLOCKSCOUT_API}?module=account&action=tokentx&address={address}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             try:
@@ -76,26 +76,44 @@ async def track_transactions():
                     tx_hash = tx["hash"]
                     if tx_hash not in TX_CACHE:
                         TX_CACHE.add(tx_hash)
-                        await notify_transaction(tx, data["name"], data["chat_id"])
+                        await notify_transaction(tx, address, data["name"], data["chat_id"])
                         new_tx_detected = True
         if new_tx_detected:
             save_tx_cache()  # Simpan cache jika ada transaksi baru
         await asyncio.sleep(30)
 
-async def detect_transaction_type(tx):
-    """Mendeteksi jenis transaksi."""
+async def detect_transaction_type(tx, address):
+    """Mendeteksi jenis transaksi dengan lebih akurat."""
+    sender = tx["from"].lower()
+    receiver = tx["to"].lower()
+    contract = tx.get("contractAddress", "").lower()
+    value = int(tx["value"])
+
+    # Jika transaksi adalah NFT
+    if "tokenSymbol" in tx and "NFT" in tx["tokenSymbol"]:
+        if sender == address.lower():
+            return "🎨 NFT Sale"  # Address yang dipantau menjual NFT
+        elif receiver == address.lower():
+            return "🛒 NFT Purchase"  # Address yang dipantau membeli NFT
+
+    # Jika transaksi adalah token biasa (bukan NFT)
+    if "tokenSymbol" in tx:
+        return "🔁 Token Transfer"
+
+    # Jika transaksi memiliki input data (interaksi dengan smart contract) dan bukan NFT
     if tx["input"] != "0x":
         return "🔄 Swap"
-    elif tx["value"] != "0":
-        return "🔁 Transfer"
-    elif "tokenSymbol" in tx and "NFT" in tx["tokenSymbol"]:  
-        return "🎨 NFT Sale" if tx["value"] != "0" else "🛒 NFT Purchase"
+
+    # Jika transaksi memiliki nilai ETH/tokens yang dikirim langsung
+    if value > 0:
+        return "🔁 ETH Transfer"
+
     return "🔍 Unknown"
 
-async def notify_transaction(tx, name, chat_id):
+async def notify_transaction(tx, address, name, chat_id):
     """Mengirim notifikasi transaksi baru ke pemilik address"""
     try:
-        tx_type = await detect_transaction_type(tx)
+        tx_type = await detect_transaction_type(tx, address)
         msg = (f"🔔 <b>Transaksi Baru</b> 🔔\n"
                f"👤 <b>{name}</b>\n"
                f"🔹 Type: {tx_type}\n"
