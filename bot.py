@@ -22,8 +22,8 @@ TX_CACHE = set()
 
 BLOCKSCOUT_API = "https://soneium.blockscout.com/api"
 
+# Load & Save Functions
 def load_watched_addresses():
-    """Memuat daftar alamat yang dipantau dari file."""
     global WATCHED_ADDRESSES
     try:
         with open(WATCHED_ADDRESSES_FILE, "r") as f:
@@ -32,12 +32,10 @@ def load_watched_addresses():
         WATCHED_ADDRESSES = {}
 
 def save_watched_addresses():
-    """Menyimpan daftar alamat yang dipantau ke file."""
     with open(WATCHED_ADDRESSES_FILE, "w") as f:
         json.dump(WATCHED_ADDRESSES, f)
 
 def load_tx_cache():
-    """Memuat transaksi yang sudah dicatat agar tidak dikirim berulang."""
     global TX_CACHE
     try:
         with open(TX_CACHE_FILE, "r") as f:
@@ -46,27 +44,27 @@ def load_tx_cache():
         TX_CACHE = set()
 
 def save_tx_cache():
-    """Menyimpan transaksi yang sudah dikirim agar tidak terjadi spam."""
     with open(TX_CACHE_FILE, "w") as f:
         json.dump(list(TX_CACHE), f)
 
+# Fetch Transactions
 async def fetch_transactions(address):
-    """Mengambil transaksi terbaru dari Blockscout API."""
     url = f"{BLOCKSCOUT_API}?module=account&action=tokentx&address={address}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            try:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
                 return await response.json()
-            except json.JSONDecodeError:
-                return {"result": []}
+    except Exception as e:
+        logging.error(f"❌ Gagal mengambil transaksi dari Blockscout: {e}")
+        return {"result": []}
 
+# Track Transactions
 async def track_transactions():
-    """Melacak transaksi baru dan memasukkan ke dalam antrian notifikasi."""
     while True:
-        new_tx_count = 0
-        notification_queue = asyncio.Queue()  # Buat antrian notifikasi
+        new_tx_detected = False
+        notification_queue = asyncio.Queue()
 
-        for address, data in WATCHED_ADDRESSES.items():
+        for address, data in list(WATCHED_ADDRESSES.items()):
             transactions = await fetch_transactions(address)
             if transactions.get("result"):
                 for tx in transactions["result"]:
@@ -75,27 +73,27 @@ async def track_transactions():
                     if tx_hash and tx_hash not in TX_CACHE:
                         TX_CACHE.add(tx_hash)
                         notification_queue.put_nowait((tx, address, data.get("name", "Unknown"), data["chat_id"]))
-                        new_tx_count += 1
+                        new_tx_detected = True
 
-        if new_tx_count > 0:
+        if new_tx_detected:
             save_tx_cache()
             await send_notifications(notification_queue)
 
-        logging.info(f"✅ {new_tx_count} transaksi baru terdeteksi.")
-        await asyncio.sleep(30)  # Tunggu 30 detik sebelum cek ulang
+        logging.info(f"✅ Scan transaksi selesai. Menunggu 30 detik...")
+        await asyncio.sleep(30)
 
+# Send Notifications
 async def send_notifications(queue):
-    """Mengirim notifikasi dengan delay untuk menghindari Telegram flood limit."""
     while not queue.empty():
         tx, address, name, chat_id = await queue.get()
         try:
             await notify_transaction(tx, address, name, chat_id)
-            await asyncio.sleep(2)  # Delay antar pesan untuk menghindari spam
+            await asyncio.sleep(2)  # Delay antar pesan
         except Exception as e:
             logging.error(f"❌ Gagal mengirim notifikasi: {e}")
 
+# Notify Transaction
 async def notify_transaction(tx, address, name, chat_id):
-    """Mengirim pesan transaksi baru ke Telegram."""
     try:
         tx_type = await detect_transaction_type(tx, address)
         msg = (f"🔔 <b>Transaksi Baru</b> 🔔\n"
@@ -106,8 +104,8 @@ async def notify_transaction(tx, address, name, chat_id):
     except Exception as e:
         logging.error(f"❌ Gagal mengirim notifikasi: {e}")
 
+# Detect Transaction Type
 async def detect_transaction_type(tx, address):
-    """Mendeteksi jenis transaksi berdasarkan isi data transaksi."""
     sender = tx.get("from", "").lower()
     receiver = tx.get("to", "").lower()
     value = int(tx.get("value", "0")) if tx.get("value") else 0
@@ -126,15 +124,14 @@ async def detect_transaction_type(tx, address):
 
     return "🔍 Unknown"
 
+# Telegram Commands
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    """Menampilkan pesan selamat datang."""
     await message.answer("🚀 Selamat datang di Soneium Tracker!\n"
                          "Gunakan /add <address> <nama> untuk mulai melacak transaksi.")
 
 @dp.message(Command("add"))
 async def add_address(message: Message):
-    """Menambahkan alamat wallet ke daftar yang dipantau."""
     parts = message.text.split()
     if len(parts) < 3:
         await message.answer("⚠ Gunakan format: /add <address> <nama>")
@@ -148,7 +145,6 @@ async def add_address(message: Message):
 
 @dp.message(Command("list"))
 async def list_addresses(message: Message):
-    """Menampilkan daftar alamat yang dipantau."""
     if not WATCHED_ADDRESSES:
         await message.answer("📭 Belum ada alamat yang dipantau.")
     else:
@@ -159,7 +155,6 @@ async def list_addresses(message: Message):
 
 @dp.message(Command("remove"))
 async def remove_address(message: Message):
-    """Menghapus alamat dari daftar pantauan."""
     parts = message.text.split()
     if len(parts) < 2:
         await message.answer("⚠ Gunakan format: /remove <address>")
@@ -173,6 +168,7 @@ async def remove_address(message: Message):
     else:
         await message.answer("⚠ Alamat tidak ditemukan dalam daftar.")
 
+# Main Function
 async def main():
     logging.info("🚀 Bot mulai berjalan...")
     load_watched_addresses()
