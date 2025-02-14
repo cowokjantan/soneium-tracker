@@ -18,7 +18,7 @@ WATCHED_ADDRESSES_FILE = "watched_addresses.json"
 TX_CACHE_FILE = "tx_cache.json"
 
 WATCHED_ADDRESSES = {}
-TX_CACHE = set()  # Menyimpan hash transaksi yang sudah diproses
+TX_CACHE = set()
 
 BLOCKSCOUT_API = "https://soneium.blockscout.com/api"
 
@@ -56,7 +56,6 @@ async def fetch_transactions(address):
                 return {"result": []}
 
 async def track_transactions():
-    """Cek transaksi baru setiap 30 detik tanpa mengulang transaksi lama."""
     while True:
         new_tx_detected = False
         for address, data in WATCHED_ADDRESSES.items():
@@ -64,30 +63,28 @@ async def track_transactions():
             if "result" in transactions:
                 for tx in transactions["result"]:
                     tx_hash = tx["hash"]
-                    if tx_hash not in TX_CACHE:  # Jika transaksi baru
+                    if tx_hash not in TX_CACHE:
                         TX_CACHE.add(tx_hash)
                         await notify_transaction(tx, address, data["name"], data["chat_id"])
                         new_tx_detected = True
-        
         if new_tx_detected:
-            save_tx_cache()  # Simpan transaksi baru ke cache
+            save_tx_cache()
         await asyncio.sleep(30)
 
 async def initialize_tx_cache():
-    """Memuat transaksi awal tanpa mengirim notifikasi."""
     logging.info("🔄 Mengisi cache transaksi awal...")
     for address in WATCHED_ADDRESSES.keys():
         transactions = await fetch_transactions(address)
         if "result" in transactions:
             for tx in transactions["result"]:
-                TX_CACHE.add(tx["hash"])  # Tambahkan transaksi tanpa notif
-    save_tx_cache()  # Simpan cache ke file
+                TX_CACHE.add(tx["hash"])
+    save_tx_cache()
     logging.info("✅ Cache transaksi awal tersimpan.")
 
 async def detect_transaction_type(tx, address):
     sender = tx["from"].lower()
     receiver = tx["to"].lower()
-    value = int(tx["value"])
+    value = int(tx.get("value", "0"))
 
     if "tokenSymbol" in tx and "NFT" in tx["tokenSymbol"]:
         return "🎨 NFT Sale" if sender == address.lower() else "🛒 NFT Purchase"
@@ -104,7 +101,6 @@ async def detect_transaction_type(tx, address):
     return "🔍 Unknown"
 
 async def notify_transaction(tx, address, name, chat_id):
-    """Mengirim notifikasi jika ada transaksi baru."""
     try:
         tx_type = await detect_transaction_type(tx, address)
         msg = (f"🔔 <b>Transaksi Baru</b> 🔔\n"
@@ -161,8 +157,8 @@ async def remove_address(message: Message):
 async def main():
     logging.info("🚀 Bot mulai berjalan...")
     load_watched_addresses()
-    load_tx_cache()  # Load transaksi yang sudah diproses sebelumnya
-    await initialize_tx_cache()  # Isi cache tanpa notif saat pertama kali berjalan
+    load_tx_cache()
+    await initialize_tx_cache()
     loop = asyncio.get_event_loop()
     loop.create_task(track_transactions())
     await dp.start_polling(bot)
